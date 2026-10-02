@@ -40,6 +40,7 @@ members = [
     "livekit-plugins-cerebras",
     "livekit-plugins-clova",
     "livekit-plugins-deepgram",
+    "livekit-plugins-dialt",
     "livekit-plugins-did",
     "livekit-plugins-elevenlabs",
     "livekit-plugins-fal",
@@ -964,6 +965,19 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/0f/d5/c66da9b79e5bdb124974bfe172b4daf3c984ebd9c2a06e2b8a4dc7331c72/defusedxml-0.7.1.tar.gz", hash = "sha256:1bb3032db185915b62d7c6209c5a8792be6a32ab2fedacc84e01b52c51aa3e69", size = 75520, upload-time = "2021-03-08T10:59:26.269Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/07/6c/aa3f2f849e01cb6a001cd8554a88d4c77c5c1a31c95bdf1cf9301e6d9ef4/defusedxml-0.7.1-py2.py3-none-any.whl", hash = "sha256:a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61", size = 25604, upload-time = "2021-03-08T10:59:24.45Z" },
+]
+
+[[package]]
+name = "dialt-sdk"
+version = "0.41.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/fe/4c/344dfaae780a6049644f8cd160625cb5b9790230ab10ae3c4b6659b5ff78/dialt_sdk-0.41.0.tar.gz", hash = "sha256:e73a043514e0c3ff51dd5e2e32afeadd1f80e90a07a898a932aafc5c6752dfe7", size = 83923, upload-time = "2026-09-30T11:36:38.425Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/95/d8/3df2ed3acb2fe034532049dfbfebd68793ed29289545bcd2a2b42231222d/dialt_sdk-0.41.0-py3-none-any.whl", hash = "sha256:5b73d886de70f66ae92ca2146905662723a4dce6f385637615267b0892e4345a", size = 59136, upload-time = "2026-09-30T11:36:37.369Z" },
 ]
 
 [[package]]
@@ -2051,6 +2065,9 @@ codecs = [
 deepgram = [
     { name = "livekit-plugins-deepgram" },
 ]
+dialt = [
+    { name = "livekit-plugins-dialt" },
+]
 did = [
     { name = "livekit-plugins-did" },
 ]
@@ -2256,6 +2273,7 @@ requires-dist = [
     { name = "livekit-plugins-cerebras", marker = "extra == 'cerebras'", editable = "livekit-plugins/livekit-plugins-cerebras" },
     { name = "livekit-plugins-clova", marker = "extra == 'clova'", editable = "livekit-plugins/livekit-plugins-clova" },
     { name = "livekit-plugins-deepgram", marker = "extra == 'deepgram'", editable = "livekit-plugins/livekit-plugins-deepgram" },
+    { name = "livekit-plugins-dialt", marker = "extra == 'dialt'", editable = "livekit-plugins/livekit-plugins-dialt" },
     { name = "livekit-plugins-did", marker = "extra == 'did'", editable = "livekit-plugins/livekit-plugins-did" },
     { name = "livekit-plugins-elevenlabs", marker = "extra == 'elevenlabs'", editable = "livekit-plugins/livekit-plugins-elevenlabs" },
     { name = "livekit-plugins-fal", marker = "extra == 'fal'", editable = "livekit-plugins/livekit-plugins-fal" },
@@ -2333,7 +2351,7 @@ requires-dist = [
     { name = "typing-extensions", specifier = ">=4.12" },
     { name = "watchfiles", specifier = ">=1.0" },
 ]
-provides-extras = ["anam", "anthropic", "assemblyai", "asyncai", "avatario", "avatartalk", "aws", "azure", "baseten", "bey", "bithuman", "bland", "browser", "cambai", "cartesia", "cerebras", "clova", "codecs", "deepgram", "did", "elevenlabs", "fal", "fireworksai", "fishaudio", "gladia", "gnani", "google", "gradium", "groq", "hamming", "hume", "images", "inworld", "keyframe", "langchain", "lemonslice", "liveavatar", "lmnt", "mcp", "meta", "microsoft-ai", "minimax", "mistralai", "murf", "neuphonic", "nltk", "nvidia", "openai", "palabra", "perplexity", "phonic", "protoface", "resemble", "respeecher", "rime", "rtzr", "runway", "sarvam", "silero", "simli", "simplismart", "slng", "smallestai", "soniox", "spatius", "speechify", "speechmatics", "spitch", "synthesia", "tavus", "trugen", "turn-detector", "ultravox", "upliftai", "vakyam", "xai"]
+provides-extras = ["anam", "anthropic", "assemblyai", "asyncai", "avatario", "avatartalk", "aws", "azure", "baseten", "bey", "bithuman", "bland", "browser", "cambai", "cartesia", "cerebras", "clova", "codecs", "deepgram", "dialt", "did", "elevenlabs", "fal", "fireworksai", "fishaudio", "gladia", "gnani", "google", "gradium", "groq", "hamming", "hume", "images", "inworld", "keyframe", "langchain", "lemonslice", "liveavatar", "lmnt", "mcp", "meta", "microsoft-ai", "minimax", "mistralai", "murf", "neuphonic", "nltk", "nvidia", "openai", "palabra", "perplexity", "phonic", "protoface", "resemble", "respeecher", "rime", "rtzr", "runway", "sarvam", "silero", "simli", "simplismart", "slng", "smallestai", "soniox", "spatius", "speechify", "speechmatics", "spitch", "synthesia", "tavus", "trugen", "turn-detector", "ultravox", "upliftai", "vakyam", "xai"]
 
 [[package]]
 name = "livekit-api"
@@ -2589,6 +2607,7 @@ source = { virtual = "examples/voice_agents" }
 dependencies = [
     { name = "duckduckgo-search" },
     { name = "livekit-agents", extra = ["cartesia", "deepgram", "elevenlabs", "mcp", "openai", "silero", "turn-detector"] },
+    { name = "livekit-plugins-dialt" },
     { name = "python-dotenv" },
 ]
 
@@ -2596,6 +2615,7 @@ dependencies = [
 requires-dist = [
     { name = "duckduckgo-search", specifier = ">=8.0" },
     { name = "livekit-agents", extras = ["openai", "cartesia", "elevenlabs", "deepgram", "silero", "turn-detector", "mcp"], editable = "livekit-agents" },
+    { name = "livekit-plugins-dialt", editable = "livekit-plugins/livekit-plugins-dialt" },
     { name = "python-dotenv", specifier = ">=1.0" },
 ]
 
@@ -2901,6 +2921,20 @@ dependencies = [
 requires-dist = [
     { name = "livekit-agents", extras = ["codecs"], editable = "livekit-agents" },
     { name = "numpy", specifier = ">=1.26" },
+]
+
+[[package]]
+name = "livekit-plugins-dialt"
+source = { editable = "livekit-plugins/livekit-plugins-dialt" }
+dependencies = [
+    { name = "dialt-sdk" },
+    { name = "livekit-agents" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "dialt-sdk", specifier = "==0.41.0" },
+    { name = "livekit-agents", editable = "livekit-agents" },
 ]
 
 [[package]]
