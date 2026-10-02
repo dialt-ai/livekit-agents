@@ -163,6 +163,11 @@ async def test_generation_tool_call_interruption_and_playback_reporting(
     assert fake_sdk.injections[0]["reply"] is True
     assert fake_sdk.tool_choices == [({"tool": "lookup_balance"}, True)]
 
+    await fake_sdk.emit(
+        "inject_context_ack",
+        message_id=fake_sdk.injections[0]["message_id"],
+        accepted=True,
+    )
     await fake_sdk.emit("turn", turn_id="turn-1")
     generation = await asyncio.wait_for(reply, 1)
     assert generation.user_initiated is True
@@ -189,12 +194,21 @@ async def test_generation_tool_call_interruption_and_playback_reporting(
     session.on("input_speech_started", speech_started.append)
     await fake_sdk.emit("interrupted", turn_id="turn-1", barge_seq=9, clear=True)
     await wait_for(lambda: bool(speech_started))
-    session.truncate(message_id="turn-1", modalities=["audio", "text"], audio_end_ms=25)
+    session.truncate(
+        message_id="turn-1",
+        modalities=["audio", "text"],
+        audio_end_ms=25,
+        audio_transcript="Your balance is",
+    )
     await wait_for(lambda: bool(fake_sdk.client_events))
     assert fake_sdk.client_events[-1] == (
         "playback_stopped",
         {"discarded_ms": 75, "barge_seq": 9},
     )
+    truncated = session.chat_ctx.get_by_id("turn-1")
+    assert isinstance(truncated, llm.ChatMessage)
+    assert truncated.text_content == "Your balance is"
+    assert truncated.interrupted is True
     await session.aclose()
 
 
@@ -270,8 +284,8 @@ async def test_rejected_reply_machine_error_and_reconnect_are_asymmetric(
     await fake_sdk.emit("asr", turn_id="input-1", text="I need a flight")
     await fake_sdk.emit("asr_correction", turn_id="input-1", text="I need a refund")
     await fake_sdk.emit("error", code="server_busy", detail="busy", retryable=True)
-    await fake_sdk.emit("resume_failed", code="resume_failed", detail="expired", retryable=False)
     await fake_sdk.emit("reconnected", attempt=2)
+    await fake_sdk.emit("resume_failed", code="resume_failed", detail="expired", retryable=False)
     await wait_for(lambda: len(errors) == 2 and len(reconnected) == 1)
     assert errors[0].recoverable is True
     assert cast_realtime_error(errors[0]).code == "server_busy"
@@ -282,6 +296,76 @@ async def test_rejected_reply_machine_error_and_reconnect_are_asymmetric(
     assert isinstance(corrected, llm.ChatMessage)
     assert corrected.text_content == "I need a refund"
     await session.aclose()
+    assert fake_sdk.closed is True
+
+
+@pytest.mark.asyncio
+async def test_reply_waits_for_its_ack_and_canceled_reply_output_is_discarded(
+    fake_sdk: FakeDialtSession,
+) -> None:
+    session = make_model().session()
+    generations: list[llm.GenerationCreatedEvent] = []
+    session.on("generation_created", generations.append)
+
+    reply = session.generate_reply(instructions="Give a concise answer.")
+    await wait_for(lambda: bool(fake_sdk.injections))
+    message_id = fake_sdk.injections[0]["message_id"]
+
+    await fake_sdk.emit("turn", turn_id="unrelated")
+    await wait_for(lambda: len(generations) == 1)
+    assert generations[0].user_initiated is False
+    assert not reply.done()
+
+    await fake_sdk.emit("inject_context_ack", message_id=message_id, accepted=True)
+    reply.cancel()
+    await fake_sdk.emit("turn", turn_id="canceled")
+    await fake_sdk.emit("text_delta", turn_id="canceled", delta="must not leak")
+    await fake_sdk.emit("tool_call", id="ignored", name="lookup", args={})
+    await fake_sdk.emit("canceled", turn_id="canceled")
+    await fake_sdk.emit("tool_call", id="next", name="lookup", args={})
+    await asyncio.sleep(0)
+    assert len(generations) == 2
+    assert generations[1].response_id.startswith("dialt_tool_")
+    assert reply.cancelled()
+    await session.aclose()
+
+
+@pytest.mark.asyncio
+async def test_terminal_event_stream_fails_pending_reply_and_sdk_still_closes(
+    fake_sdk: FakeDialtSession,
+) -> None:
+    session = make_model().session()
+    reply = session.generate_reply()
+    await wait_for(lambda: bool(fake_sdk.injections))
+
+    await fake_sdk.events_queue.put(None)
+    with pytest.raises(llm.RealtimeError, match="session ended") as raised:
+        await reply
+    assert raised.value.code == "connection_closed"
+
+    await session.aclose()
+    assert fake_sdk.closed is True
+
+
+@pytest.mark.asyncio
+async def test_session_options_are_isolated_and_response_tools_are_rejected(
+    fake_sdk: FakeDialtSession,
+) -> None:
+    model = make_model(tool_choice="auto")
+    first = model.session()
+    second = model.session()
+    await wait_for(lambda: first._sdk_fut.done() and second._sdk_fut.done())
+
+    first.update_options(tool_choice="none")
+    await wait_for(lambda: bool(fake_sdk.tool_choices))
+    assert second._opts.tool_choice == "auto"
+    assert model.capabilities.per_response_tool_choice is False
+    assert model.capabilities.mutable_chat_context is False
+
+    reply = first.generate_reply(tools=[])
+    with pytest.raises(llm.RealtimeError, match="per-response tools"):
+        await reply
+    await model.aclose()
 
 
 def cast_realtime_error(error: llm.RealtimeModelError) -> llm.RealtimeError:

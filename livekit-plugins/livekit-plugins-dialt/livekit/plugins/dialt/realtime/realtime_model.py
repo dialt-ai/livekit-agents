@@ -7,7 +7,7 @@ import os
 import time
 import weakref
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 
 from dialt import (
@@ -72,6 +72,14 @@ class _Generation:
     done: bool = False
 
 
+@dataclass
+class _PendingReply:
+    future: asyncio.Future[llm.GenerationCreatedEvent]
+    message_id: str
+    acknowledged: bool = False
+    request_sent: bool = False
+
+
 def _dialt_tool_choice(choice: llm.ToolChoice | None) -> str | dict[str, Any]:
     if choice is None:
         return "auto"
@@ -129,10 +137,10 @@ class RealtimeModel(llm.RealtimeModel):
                 manual_function_calls=False,
                 can_disable_turn_detection=True,
                 supports_overlapping_speech=False,
-                mutable_chat_context=True,
+                mutable_chat_context=False,
                 mutable_instructions=True,
                 mutable_tools=True,
-                per_response_tool_choice=True,
+                per_response_tool_choice=False,
             )
         )
         self._opts = _Options(
@@ -177,7 +185,10 @@ class RealtimeSession(llm.RealtimeSession[Literal["dialt_server_event_received"]
     ) -> None:
         super().__init__(realtime_model)
         self._realtime_model = realtime_model
-        self._opts = realtime_model._opts
+        self._opts = replace(
+            realtime_model._opts,
+            tool_options=dict(realtime_model._opts.tool_options),
+        )
         self._turn_detection_disabled = turn_detection_disabled
         self._instructions = self._opts.instructions
         self._tools = llm.ToolContext.empty()
@@ -187,12 +198,15 @@ class RealtimeSession(llm.RealtimeSession[Literal["dialt_server_event_received"]
         self._input_resampler_rate: int | None = None
         self._audio_ch = utils.aio.Chan[bytes]()
         self._sdk_fut = asyncio.Future[DialtSession]()
-        self._pending_replies: list[asyncio.Future[llm.GenerationCreatedEvent]] = []
+        self._pending_replies: list[_PendingReply] = []
         self._reply_tasks: set[asyncio.Task[None]] = set()
+        self._tool_choice_task: asyncio.Task[None] | None = None
         self._current_generation: _Generation | None = None
         self._recent_generations: dict[str, _Generation] = {}
+        self._discarded_turn_id: str | None = None
         self._input_speech_active = False
         self._closed = False
+        self._aclose_done = False
         self._main_atask = asyncio.create_task(self._main_task(), name="DialtSession._main_task")
 
     @property
@@ -274,6 +288,7 @@ class RealtimeSession(llm.RealtimeSession[Literal["dialt_server_event_received"]
             return
         self._opts.tool_choice = tool_choice
         task = asyncio.create_task(self._set_tool_choice(tool_choice), name="dialt-set-tool-choice")
+        self._tool_choice_task = task
         self._reply_tasks.add(task)
         task.add_done_callback(self._reply_tasks.discard)
 
@@ -321,10 +336,11 @@ class RealtimeSession(llm.RealtimeSession[Literal["dialt_server_event_received"]
         if self._closed:
             fut.set_exception(llm.RealtimeError("Dialt session is closed"))
             return fut
-        self._pending_replies.append(fut)
+        pending = _PendingReply(future=fut, message_id=utils.shortuuid("dialt_reply_"))
+        self._pending_replies.append(pending)
         task = asyncio.create_task(
             self._request_reply(
-                fut, instructions=instructions, tool_choice=tool_choice, tools=tools
+                pending, instructions=instructions, tool_choice=tool_choice, tools=tools
             ),
             name="dialt-generate-reply",
         )
@@ -332,15 +348,19 @@ class RealtimeSession(llm.RealtimeSession[Literal["dialt_server_event_received"]
         task.add_done_callback(self._reply_tasks.discard)
 
         def remove_pending(_: asyncio.Future[llm.GenerationCreatedEvent]) -> None:
-            with contextlib.suppress(ValueError):
-                self._pending_replies.remove(fut)
+            if fut.cancelled():
+                task.cancel()
+                if not pending.request_sent:
+                    self._remove_pending_reply(pending)
+            else:
+                self._remove_pending_reply(pending)
 
         fut.add_done_callback(remove_pending)
         return fut
 
     async def _request_reply(
         self,
-        fut: asyncio.Future[llm.GenerationCreatedEvent],
+        pending: _PendingReply,
         *,
         instructions: NotGivenOr[str],
         tool_choice: NotGivenOr[llm.ToolChoice],
@@ -348,24 +368,40 @@ class RealtimeSession(llm.RealtimeSession[Literal["dialt_server_event_received"]
     ) -> None:
         try:
             sdk = await self._sdk_session()
+            if (
+                self._tool_choice_task is not None
+                and self._tool_choice_task is not asyncio.current_task()
+            ):
+                await asyncio.shield(self._tool_choice_task)
             if is_given(tools):
-                await sdk.set_tools(to_dialt_tools(tools, self._opts.tool_options))
+                raise llm.RealtimeError(
+                    "Dialt does not support per-response tools; update session tools first"
+                )
             if is_given(tool_choice):
                 await sdk.set_tool_choice(_dialt_tool_choice(tool_choice), one_shot=True)
             prompt = instructions if is_given(instructions) else "Respond to the caller now."
-            ack = await sdk.inject_context(prompt, role="context", reply=True)
+            pending.request_sent = True
+            ack = await sdk.inject_context(
+                prompt,
+                role="context",
+                reply=True,
+                message_id=pending.message_id,
+            )
             if not ack.get("accepted", False):
                 raise llm.RealtimeError(
                     str(ack.get("detail") or "Dialt rejected the reply request"),
                     code=cast(str | None, ack.get("code")),
                 )
         except Exception as exc:
-            with contextlib.suppress(ValueError):
-                self._pending_replies.remove(fut)
-            if not fut.done():
+            self._remove_pending_reply(pending)
+            if not pending.future.done():
                 if isinstance(exc, DialtError):
                     exc = llm.RealtimeError(str(exc), code=exc.code)
-                fut.set_exception(exc)
+                pending.future.set_exception(exc)
+
+    def _remove_pending_reply(self, pending: _PendingReply) -> None:
+        with contextlib.suppress(ValueError):
+            self._pending_replies.remove(pending)
 
     def commit_audio(self) -> None:
         if not self._turn_detection_disabled or self._closed:
@@ -392,10 +428,15 @@ class RealtimeSession(llm.RealtimeSession[Literal["dialt_server_event_received"]
         audio_end_ms: int,
         audio_transcript: NotGivenOr[str] = NOT_GIVEN,
     ) -> None:
-        del modalities, audio_transcript
+        del modalities
         generation = self._recent_generations.get(message_id)
         if generation is None:
             return
+        if is_given(audio_transcript):
+            item = self._chat_ctx.get_by_id(message_id)
+            if isinstance(item, llm.ChatMessage):
+                item.content = [audio_transcript]
+                item.interrupted = True
         discarded_ms = max(0, generation.generated_audio_ms - audio_end_ms)
         task = asyncio.create_task(
             self._report_playback_stopped(discarded_ms, generation.barge_seq),
@@ -411,8 +452,9 @@ class RealtimeSession(llm.RealtimeSession[Literal["dialt_server_event_received"]
         await (await self._sdk_session()).send_client_event("playback_stopped", **fields)
 
     async def aclose(self) -> None:
-        if self._closed:
+        if self._aclose_done:
             return
+        self._aclose_done = True
         self._closed = True
         self._audio_ch.close()
         if self._reply_tasks:
@@ -421,9 +463,9 @@ class RealtimeSession(llm.RealtimeSession[Literal["dialt_server_event_received"]
         if self._sdk_fut.done() and not self._sdk_fut.cancelled():
             with contextlib.suppress(Exception):
                 await self._sdk_fut.result().close()
-        for fut in self._pending_replies:
-            if not fut.done():
-                fut.cancel("Dialt session closed")
+        for pending in self._pending_replies:
+            if not pending.future.done():
+                pending.future.cancel("Dialt session closed")
         if self._current_generation is not None:
             self._close_generation(self._current_generation, interrupted=True)
 
@@ -478,6 +520,20 @@ class RealtimeSession(llm.RealtimeSession[Literal["dialt_server_event_received"]
                 self._sdk_fut.set_exception(exc)
             recoverable = bool(getattr(exc, "retryable", False))
             self._emit_error(exc, recoverable=recoverable)
+        finally:
+            if not self._closed:
+                self._terminate_session("Dialt session ended")
+
+    def _terminate_session(self, reason: str) -> None:
+        self._closed = True
+        self._audio_ch.close()
+        error = llm.RealtimeError(reason, code="connection_closed")
+        for pending in list(self._pending_replies):
+            if not pending.future.done():
+                pending.future.set_exception(error)
+        self._pending_replies.clear()
+        if self._current_generation is not None:
+            self._close_generation(self._current_generation, interrupted=True)
 
     async def _audio_loop(self, sdk: DialtSession) -> None:
         async for audio in self._audio_ch:
@@ -491,7 +547,32 @@ class RealtimeSession(llm.RealtimeSession[Literal["dialt_server_event_received"]
     def _handle_event(self, event: SessionEvent) -> None:
         data = event.data
         if event.type == "turn":
-            self._start_generation(str(data.get("turn_id") or utils.shortuuid("dialt_turn_")))
+            turn_id = str(data.get("turn_id") or utils.shortuuid("dialt_turn_"))
+            canceled = next(
+                (
+                    item
+                    for item in self._pending_replies
+                    if item.acknowledged and item.future.cancelled()
+                ),
+                None,
+            )
+            if canceled is not None:
+                self._remove_pending_reply(canceled)
+                if self._current_generation is not None:
+                    self._close_generation(self._current_generation, interrupted=True)
+                self._discarded_turn_id = turn_id
+            else:
+                self._start_generation(turn_id)
+        elif event.type == "inject_context_ack":
+            message_id = data.get("message_id")
+            pending = next(
+                (item for item in self._pending_replies if item.message_id == message_id), None
+            )
+            if pending is not None:
+                if data.get("accepted", False):
+                    pending.acknowledged = True
+                else:
+                    self._remove_pending_reply(pending)
         elif event.type == "text_delta":
             generation = self._generation_for(data.get("turn_id"))
             delta = data.get("delta")
@@ -519,12 +600,22 @@ class RealtimeSession(llm.RealtimeSession[Literal["dialt_server_event_received"]
                 generation.output_text = text
                 generation.text_ch.send_nowait(text)
         elif event.type == "done":
+            if str(data.get("turn_id")) == self._discarded_turn_id:
+                self._discarded_turn_id = None
+                return
             generation = self._generation_for(data.get("turn_id"))
             if generation is not None:
                 self._close_generation(generation, interrupted=False)
         elif event.type == "tool_call":
-            self._handle_tool_call(data)
+            if self._discarded_turn_id is None:
+                self._handle_tool_call(data)
         elif event.type == "interrupted":
+            if str(data.get("turn_id")) == self._discarded_turn_id:
+                self._discarded_turn_id = None
+                if not self._input_speech_active:
+                    self._input_speech_active = True
+                    self.emit("input_speech_started", llm.InputSpeechStartedEvent())
+                return
             generation = self._generation_for(data.get("turn_id"))
             if generation is not None:
                 generation.barge_seq = cast(int | None, data.get("barge_seq"))
@@ -534,6 +625,9 @@ class RealtimeSession(llm.RealtimeSession[Literal["dialt_server_event_received"]
             if generation is not None:
                 self._close_generation(generation, interrupted=True)
         elif event.type == "canceled":
+            if str(data.get("turn_id")) == self._discarded_turn_id:
+                self._discarded_turn_id = None
+                return
             generation = self._generation_for(data.get("turn_id"))
             if generation is not None:
                 generation.generated_audio_ms = 0
@@ -549,6 +643,8 @@ class RealtimeSession(llm.RealtimeSession[Literal["dialt_server_event_received"]
             detail = str(data.get("detail") or "Dialt realtime error")
             error = llm.RealtimeError(detail, code=cast(str | None, data.get("code")))
             self._emit_error(error, recoverable=bool(data.get("retryable", False)))
+            if event.type == "resume_failed":
+                self._terminate_session(detail)
         elif event.type == "tool_cancel":
             logger.info("Dialt canceled a tool call", extra={"call_id": data.get("id")})
 
@@ -583,7 +679,14 @@ class RealtimeSession(llm.RealtimeSession[Literal["dialt_server_event_received"]
         if len(self._recent_generations) > 8:
             self._recent_generations.pop(next(iter(self._recent_generations)))
 
-        pending = next((fut for fut in self._pending_replies if not fut.done()), None)
+        pending = next(
+            (
+                item
+                for item in self._pending_replies
+                if item.acknowledged and not item.future.done()
+            ),
+            None,
+        )
         event = llm.GenerationCreatedEvent(
             message_stream=generation.message_ch,
             function_stream=generation.function_ch,
@@ -591,7 +694,7 @@ class RealtimeSession(llm.RealtimeSession[Literal["dialt_server_event_received"]
             response_id=turn_id,
         )
         if pending is not None:
-            pending.set_result(event)
+            pending.future.set_result(event)
         self.emit("generation_created", event)
 
     def _close_generation(self, generation: _Generation, *, interrupted: bool) -> None:
