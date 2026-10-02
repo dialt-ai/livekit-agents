@@ -30,8 +30,8 @@ plugins = ["pydantic.mypy"]
 
 [project.urls]
 Documentation = "https://docs.livekit.io"
-Website = "https://dialt.com/"
-Source = "https://github.com/dialt-ai/agents"
+Website = "https://livekit.io/"
+Source = "https://github.com/livekit/agents"
 
 [tool.hatch.version]
 path = "livekit/plugins/dialt/version.py"
